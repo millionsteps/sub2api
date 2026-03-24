@@ -18,6 +18,7 @@ type stubAdminService struct {
 	proxyCounts          []service.ProxyWithAccountCount
 	redeems              []service.RedeemCode
 	createdAccounts      []*service.CreateAccountInput
+	deletedAccountIDs    []int64
 	createdProxies       []*service.CreateProxyInput
 	updatedProxyIDs      []int64
 	updatedProxies       []*service.UpdateProxyInput
@@ -188,7 +189,24 @@ func (s *stubAdminService) BatchSetGroupRateMultipliers(_ context.Context, _ int
 }
 
 func (s *stubAdminService) ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode string) ([]service.Account, int64, error) {
-	return s.accounts, int64(len(s.accounts)), nil
+	search = strings.TrimSpace(strings.ToLower(search))
+	filtered := make([]service.Account, 0, len(s.accounts))
+	for _, account := range s.accounts {
+		if platform != "" && account.Platform != platform {
+			continue
+		}
+		if accountType != "" && account.Type != accountType {
+			continue
+		}
+		if status != "" && account.Status != status {
+			continue
+		}
+		if search != "" && !strings.Contains(strings.ToLower(account.Name), search) {
+			continue
+		}
+		filtered = append(filtered, account)
+	}
+	return filtered, int64(len(filtered)), nil
 }
 
 func (s *stubAdminService) GetAccount(ctx context.Context, id int64) (*service.Account, error) {
@@ -225,6 +243,9 @@ func (s *stubAdminService) UpdateAccount(ctx context.Context, id int64, input *s
 }
 
 func (s *stubAdminService) DeleteAccount(ctx context.Context, id int64) error {
+	s.mu.Lock()
+	s.deletedAccountIDs = append(s.deletedAccountIDs, id)
+	s.mu.Unlock()
 	return nil
 }
 
