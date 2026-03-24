@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -62,6 +63,15 @@ type DataImportRequest struct {
 	SkipDefaultGroupBind *bool       `json:"skip_default_group_bind"`
 }
 
+type DataExportRequest struct {
+	IDs            []int64  `json:"ids"`
+	Platforms      []string `json:"platforms"`
+	Types          []string `json:"types"`
+	Statuses       []string `json:"statuses"`
+	Search         string   `json:"search"`
+	IncludeProxies *bool    `json:"include_proxies"`
+}
+
 type DataImportResult struct {
 	ProxyCreated   int               `json:"proxy_created"`
 	ProxyReused    int               `json:"proxy_reused"`
@@ -114,61 +124,41 @@ func (h *AccountHandler) ExportData(c *gin.Context) {
 		proxies = []service.Proxy{}
 	}
 
-	proxyKeyByID := make(map[int64]string, len(proxies))
-	dataProxies := make([]DataProxy, 0, len(proxies))
-	for i := range proxies {
-		p := proxies[i]
-		key := buildProxyKey(p.Protocol, p.Host, p.Port, p.Username, p.Password)
-		proxyKeyByID[p.ID] = key
-		dataProxies = append(dataProxies, DataProxy{
-			ProxyKey: key,
-			Name:     p.Name,
-			Protocol: p.Protocol,
-			Host:     p.Host,
-			Port:     p.Port,
-			Username: p.Username,
-			Password: p.Password,
-			Status:   p.Status,
-		})
+	response.Success(c, buildDataPayload(accounts, proxies, false))
+}
+
+// ExportDataByRequest 按请求体条件导出账号导入包。
+// POST /api/v1/admin/accounts/export-data
+func (h *AccountHandler) ExportDataByRequest(c *gin.Context) {
+	var req DataExportRequest
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
 	}
 
-	dataAccounts := make([]DataAccount, 0, len(accounts))
-	for i := range accounts {
-		acc := accounts[i]
-		var proxyKey *string
-		if acc.ProxyID != nil {
-			if key, ok := proxyKeyByID[*acc.ProxyID]; ok {
-				proxyKey = &key
-			}
+	accounts, err := h.resolveExportAccountsByRequest(c.Request.Context(), req)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	includeProxies := true
+	if req.IncludeProxies != nil {
+		includeProxies = *req.IncludeProxies
+	}
+
+	var proxies []service.Proxy
+	if includeProxies {
+		proxies, err = h.resolveExportProxies(c.Request.Context(), accounts)
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
 		}
-		var expiresAt *int64
-		if acc.ExpiresAt != nil {
-			v := acc.ExpiresAt.Unix()
-			expiresAt = &v
-		}
-		dataAccounts = append(dataAccounts, DataAccount{
-			Name:               acc.Name,
-			Notes:              acc.Notes,
-			Platform:           acc.Platform,
-			Type:               acc.Type,
-			Credentials:        acc.Credentials,
-			Extra:              acc.Extra,
-			ProxyKey:           proxyKey,
-			Concurrency:        acc.Concurrency,
-			Priority:           acc.Priority,
-			RateMultiplier:     acc.RateMultiplier,
-			ExpiresAt:          expiresAt,
-			AutoPauseOnExpired: &acc.AutoPauseOnExpired,
-		})
+	} else {
+		proxies = []service.Proxy{}
 	}
 
-	payload := DataPayload{
-		ExportedAt: time.Now().UTC().Format(time.RFC3339),
-		Proxies:    dataProxies,
-		Accounts:   dataAccounts,
-	}
-
-	response.Success(c, payload)
+	response.Success(c, buildDataPayload(accounts, proxies, true))
 }
 
 func (h *AccountHandler) ImportData(c *gin.Context) {
@@ -365,6 +355,10 @@ func (h *AccountHandler) listAccountsFiltered(ctx context.Context, platform, acc
 	return out, nil
 }
 
+func (h *AccountHandler) listAllAccounts(ctx context.Context) ([]service.Account, error) {
+	return h.listAccountsFiltered(ctx, "", "", "", "")
+}
+
 func (h *AccountHandler) resolveExportAccounts(ctx context.Context, ids []int64, c *gin.Context) ([]service.Account, error) {
 	if len(ids) > 0 {
 		accounts, err := h.adminService.GetAccountsByIDs(ctx, ids)
@@ -389,6 +383,29 @@ func (h *AccountHandler) resolveExportAccounts(ctx context.Context, ids []int64,
 		search = search[:100]
 	}
 	return h.listAccountsFiltered(ctx, platform, accountType, status, search)
+}
+
+func (h *AccountHandler) resolveExportAccountsByRequest(ctx context.Context, req DataExportRequest) ([]service.Account, error) {
+	if len(req.IDs) > 0 {
+		accounts, err := h.adminService.GetAccountsByIDs(ctx, req.IDs)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]service.Account, 0, len(accounts))
+		for _, acc := range accounts {
+			if acc == nil {
+				continue
+			}
+			out = append(out, *acc)
+		}
+		return filterAccountsByExportRequest(out, req), nil
+	}
+
+	accounts, err := h.listAllAccounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return filterAccountsByExportRequest(accounts, req), nil
 }
 
 func (h *AccountHandler) resolveExportProxies(ctx context.Context, accounts []service.Account) ([]service.Proxy, error) {
@@ -538,6 +555,127 @@ func defaultProxyName(name string) string {
 		return "imported-proxy"
 	}
 	return name
+}
+
+func buildDataPayload(accounts []service.Account, proxies []service.Proxy, includeHeader bool) DataPayload {
+	proxyKeyByID := make(map[int64]string, len(proxies))
+	dataProxies := make([]DataProxy, 0, len(proxies))
+	for i := range proxies {
+		p := proxies[i]
+		key := buildProxyKey(p.Protocol, p.Host, p.Port, p.Username, p.Password)
+		proxyKeyByID[p.ID] = key
+		dataProxies = append(dataProxies, DataProxy{
+			ProxyKey: key,
+			Name:     p.Name,
+			Protocol: p.Protocol,
+			Host:     p.Host,
+			Port:     p.Port,
+			Username: p.Username,
+			Password: p.Password,
+			Status:   p.Status,
+		})
+	}
+
+	dataAccounts := make([]DataAccount, 0, len(accounts))
+	for i := range accounts {
+		acc := accounts[i]
+		var proxyKey *string
+		if acc.ProxyID != nil {
+			if key, ok := proxyKeyByID[*acc.ProxyID]; ok {
+				proxyKey = &key
+			}
+		}
+		var expiresAt *int64
+		if acc.ExpiresAt != nil {
+			v := acc.ExpiresAt.Unix()
+			expiresAt = &v
+		}
+		dataAccounts = append(dataAccounts, DataAccount{
+			Name:               acc.Name,
+			Notes:              acc.Notes,
+			Platform:           acc.Platform,
+			Type:               acc.Type,
+			Credentials:        acc.Credentials,
+			Extra:              acc.Extra,
+			ProxyKey:           proxyKey,
+			Concurrency:        acc.Concurrency,
+			Priority:           acc.Priority,
+			RateMultiplier:     acc.RateMultiplier,
+			ExpiresAt:          expiresAt,
+			AutoPauseOnExpired: &acc.AutoPauseOnExpired,
+		})
+	}
+
+	payload := DataPayload{
+		ExportedAt: time.Now().UTC().Format(time.RFC3339),
+		Proxies:    dataProxies,
+		Accounts:   dataAccounts,
+	}
+	if includeHeader {
+		payload.Type = dataType
+		payload.Version = dataVersion
+	}
+	return payload
+}
+
+func filterAccountsByExportRequest(accounts []service.Account, req DataExportRequest) []service.Account {
+	platforms := normalizeStringSet(req.Platforms)
+	types := normalizeStringSet(req.Types)
+	statuses := normalizeStringSet(req.Statuses)
+	search := strings.ToLower(strings.TrimSpace(req.Search))
+	if len(search) > 100 {
+		search = search[:100]
+	}
+
+	if len(platforms) == 0 && len(types) == 0 && len(statuses) == 0 && search == "" {
+		return accounts
+	}
+
+	out := make([]service.Account, 0, len(accounts))
+	for i := range accounts {
+		account := accounts[i]
+		if len(platforms) > 0 {
+			if _, ok := platforms[strings.ToLower(strings.TrimSpace(account.Platform))]; !ok {
+				continue
+			}
+		}
+		if len(types) > 0 {
+			if _, ok := types[strings.ToLower(strings.TrimSpace(account.Type))]; !ok {
+				continue
+			}
+		}
+		if len(statuses) > 0 {
+			if _, ok := statuses[strings.ToLower(strings.TrimSpace(account.Status))]; !ok {
+				continue
+			}
+		}
+		if search != "" {
+			name := strings.ToLower(strings.TrimSpace(account.Name))
+			if !strings.Contains(name, search) {
+				continue
+			}
+		}
+		out = append(out, account)
+	}
+	return out
+}
+
+func normalizeStringSet(items []string) map[string]struct{} {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		normalized := strings.ToLower(strings.TrimSpace(item))
+		if normalized == "" {
+			continue
+		}
+		out[normalized] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // enrichCredentialsFromIDToken performs best-effort extraction of user info fields

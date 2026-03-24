@@ -331,6 +331,67 @@ def delete_remote_accounts_by_file_names(
     return data
 
 
+def get_remote_accounts_by_file_names(
+    base_url: str,
+    token: str,
+    file_names: list[str],
+    timeout: int,
+    insecure: bool,
+) -> dict[str, Any]:
+    if not file_names:
+        return {
+            "requested_files": 0,
+            "matched_files": 0,
+            "not_found_files": 0,
+            "results": [],
+        }
+
+    endpoint = base_url.rstrip("/") + "/api/v1/admin/accounts/get-by-file-names"
+    status_code, response_body = http_request(
+        "POST",
+        endpoint,
+        token,
+        timeout,
+        insecure,
+        body={"file_names": file_names},
+    )
+    payload = parse_json_response(status_code, response_body)
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise ValueError(f"invalid get-by-file-names response: {response_body}")
+    return data
+
+
+def replace_remote_accounts_by_file_names(
+    base_url: str,
+    token: str,
+    file_names: list[str],
+    bundle: dict[str, Any],
+    timeout: int,
+    insecure: bool,
+) -> dict[str, Any]:
+    endpoint = base_url.rstrip("/") + "/api/v1/admin/accounts/replace-by-file-names"
+    body: dict[str, Any] = {
+        "file_names": file_names,
+        "data": bundle.get("data", {}),
+    }
+    if "skip_default_group_bind" in bundle:
+        body["skip_default_group_bind"] = bundle.get("skip_default_group_bind")
+    status_code, response_body = http_request(
+        "POST",
+        endpoint,
+        token,
+        timeout,
+        insecure,
+        body=body,
+    )
+    payload = parse_json_response(status_code, response_body)
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise ValueError(f"invalid replace response: {response_body}")
+    return data
+
+
 def upload_bundle(
     base_url: str,
     token: str,
@@ -375,35 +436,59 @@ def main() -> int:
         file_names = collect_supported_file_names(args.source)
         if file_names:
             try:
-                delete_result = delete_remote_accounts_by_file_names(
+                match_result = get_remote_accounts_by_file_names(
                     args.base_url,
                     args.token,
                     file_names,
                     args.timeout,
                     args.insecure,
-                    args.dry_run,
                 )
             except ValueError as exc:
                 sys.stderr.write(f"{exc}\n")
                 return 1
 
             print(
-                "Delete by file names: "
-                f"requested={delete_result.get('requested_files', 0)} "
-                f"matched={delete_result.get('matched_files', 0)} "
-                f"deleted={delete_result.get('deleted_accounts', 0)} "
-                f"not_found={delete_result.get('not_found_files', 0)}"
+                "Get by file names: "
+                f"requested={match_result.get('requested_files', 0)} "
+                f"matched={match_result.get('matched_files', 0)} "
+                f"not_found={match_result.get('not_found_files', 0)}"
             )
-            for item in delete_result.get("results", []):
+            for item in match_result.get("results", []):
                 if not isinstance(item, dict):
                     continue
+                print("match-result: " + json.dumps(item, ensure_ascii=False))
+
+            if not args.dry_run:
+                try:
+                    delete_result = delete_remote_accounts_by_file_names(
+                        args.base_url,
+                        args.token,
+                        file_names,
+                        args.timeout,
+                        args.insecure,
+                        False,
+                    )
+                except ValueError as exc:
+                    sys.stderr.write(f"{exc}\n")
+                    return 1
+
                 print(
-                    "delete-result: "
-                    f"file={item.get('file_name')} "
-                    f"matched_ids={item.get('matched_account_ids', [])} "
-                    f"deleted_ids={item.get('deleted_account_ids', [])} "
-                    f"error={item.get('error', '')}"
+                    "Delete by file names: "
+                    f"requested={delete_result.get('requested_files', 0)} "
+                    f"matched={delete_result.get('matched_files', 0)} "
+                    f"deleted={delete_result.get('deleted_accounts', 0)} "
+                    f"not_found={delete_result.get('not_found_files', 0)}"
                 )
+                for item in delete_result.get("results", []):
+                    if not isinstance(item, dict):
+                        continue
+                    print(
+                        "delete-result: "
+                        f"file={item.get('file_name')} "
+                        f"matched_ids={item.get('matched_account_ids', [])} "
+                        f"deleted_ids={item.get('deleted_account_ids', [])} "
+                        f"error={item.get('error', '')}"
+                    )
         else:
             try:
                 matches = collect_remote_account_matches(
@@ -447,6 +532,32 @@ def main() -> int:
 
     if args.delete_only:
         print("Delete only mode enabled; upload skipped.")
+        return 0
+
+    file_names = collect_supported_file_names(args.source)
+    if file_names and not args.delete_before_upload:
+        try:
+            replace_result = replace_remote_accounts_by_file_names(
+                args.base_url,
+                args.token,
+                file_names,
+                bundle,
+                args.timeout,
+                args.insecure,
+            )
+        except ValueError as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 1
+
+        print(
+            "Replace by file names: "
+            f"requested={replace_result.get('requested_files', 0)} "
+            f"matched={replace_result.get('matched_files', 0)} "
+            f"deleted={replace_result.get('deleted_accounts', 0)} "
+            f"created={replace_result.get('account_created', 0)} "
+            f"failed={replace_result.get('account_failed', 0)}"
+        )
+        print(json.dumps(replace_result, ensure_ascii=False))
         return 0
 
     try:

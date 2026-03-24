@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -69,6 +70,7 @@ func setupAccountDataRouter() (*gin.Engine, *stubAdminService) {
 
 	router.GET("/api/v1/admin/accounts/data", h.ExportData)
 	router.POST("/api/v1/admin/accounts/data", h.ImportData)
+	router.POST("/api/v1/admin/accounts/export-data", h.ExportDataByRequest)
 	return router, adminSvc
 }
 
@@ -229,4 +231,55 @@ func TestImportDataReusesProxyAndSkipsDefaultGroup(t *testing.T) {
 	require.Len(t, adminSvc.createdProxies, 0)
 	require.Len(t, adminSvc.createdAccounts, 1)
 	require.True(t, adminSvc.createdAccounts[0].SkipDefaultGroupBind)
+}
+
+func TestExportDataByRequestFiltersAndIncludesHeader(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+	now := time.Now().UTC()
+	adminSvc.accounts = []service.Account{
+		{
+			ID:          11,
+			Name:        "codex-a@example.com",
+			Platform:    service.PlatformOpenAI,
+			Type:        service.AccountTypeOAuth,
+			Credentials: map[string]any{"access_token": "a"},
+			Concurrency: 3,
+			Priority:    50,
+			Status:      service.StatusActive,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		},
+		{
+			ID:          12,
+			Name:        "ag-b@example.com",
+			Platform:    service.PlatformAntigravity,
+			Type:        service.AccountTypeOAuth,
+			Credentials: map[string]any{"access_token": "b"},
+			Concurrency: 3,
+			Priority:    50,
+			Status:      service.StatusActive,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		},
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"platforms":       []string{service.PlatformOpenAI},
+		"types":           []string{service.AccountTypeOAuth},
+		"include_proxies": false,
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/export-data", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp dataResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, 0, resp.Code)
+	require.Equal(t, dataType, resp.Data.Type)
+	require.Equal(t, dataVersion, resp.Data.Version)
+	require.Len(t, resp.Data.Proxies, 0)
+	require.Len(t, resp.Data.Accounts, 1)
+	require.Equal(t, "codex-a@example.com", resp.Data.Accounts[0].Name)
 }

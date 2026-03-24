@@ -1,9 +1,15 @@
-# Sub2API 凭证上传与按文件名删除接口
+# Sub2API 凭证管理接口
 
-本文档说明 `sub2api` 管理员侧的两个接口：
+本文档说明 `sub2api` 管理员侧与凭证同步相关的核心接口：
 
-- 上传账号导入包：`POST /api/v1/admin/accounts/data`
-- 按凭证文件名删除账号：`POST /api/v1/admin/accounts/delete-by-file-names`
+- 导出远程账号导入包：`POST /api/v1/admin/accounts/export-data`
+- 按文件名查询远程账号：`POST /api/v1/admin/accounts/get-by-file-names`
+- 按文件名覆盖上传：`POST /api/v1/admin/accounts/replace-by-file-names`
+
+兼容保留接口：
+
+- 普通导入：`POST /api/v1/admin/accounts/data`
+- 按文件名删除：`POST /api/v1/admin/accounts/delete-by-file-names`
 
 适用场景：
 
@@ -49,20 +55,134 @@ python tools/get_sub2api_token.py \
 - `refresh_token`
 - `token_expires_at`
 
-## 2. 上传接口
+## 2. 导出接口
 
 ### 2.1 路径
 
 ```http
-POST /api/v1/admin/accounts/data
+POST /api/v1/admin/accounts/export-data
 ```
 
 ### 2.2 请求参数
 
-请求体为 JSON，结构如下：
+```json
+{
+  "platforms": ["openai", "antigravity"],
+  "types": ["oauth"],
+  "include_proxies": true
+}
+```
+
+可选字段：
+
+- `ids`
+  按账号 ID 精确导出
+- `platforms`
+  过滤平台，如 `openai`、`antigravity`
+- `types`
+  过滤账号类型，如 `oauth`
+- `statuses`
+  过滤状态，如 `active`
+- `search`
+  按账号名模糊过滤
+- `include_proxies`
+  是否带上代理配置，默认 `true`
+
+### 2.3 返回示例
 
 ```json
 {
+  "code": 0,
+  "message": "success",
+  "data": {
+    "type": "sub2api-data",
+    "version": 1,
+    "exported_at": "2026-03-25T00:00:00Z",
+    "proxies": [],
+    "accounts": [
+      {
+        "name": "codex-demo@example.com",
+        "platform": "openai",
+        "type": "oauth",
+        "credentials": {
+          "access_token": "...",
+          "refresh_token": "...",
+          "email": "demo@example.com"
+        },
+        "concurrency": 3,
+        "priority": 50
+      }
+    ]
+  }
+}
+```
+
+## 3. 按文件名查询接口
+
+### 3.1 路径
+
+```http
+POST /api/v1/admin/accounts/get-by-file-names
+```
+
+### 3.2 请求参数
+
+```json
+{
+  "file_names": [
+    "demo@example.com.json",
+    "antigravity-demo@example.com.json"
+  ]
+}
+```
+
+### 3.3 返回示例
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "requested_files": 2,
+    "matched_files": 1,
+    "not_found_files": 1,
+    "results": [
+      {
+        "file_name": "demo@example.com.json",
+        "platform": "openai",
+        "type": "oauth",
+        "candidate_names": ["codex-demo@example.com"],
+        "matched_account_ids": [101],
+        "matched_accounts": [
+          {
+            "id": 101,
+            "name": "codex-demo@example.com",
+            "platform": "openai",
+            "type": "oauth"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+## 4. 覆盖上传接口
+
+### 4.1 路径
+
+```http
+POST /api/v1/admin/accounts/replace-by-file-names
+```
+
+### 4.2 请求参数
+
+```json
+{
+  "file_names": [
+    "alice427dcd@pnj.sixthirtydance.org.json",
+    "antigravity-artemisultra662155@bngg.dsckck.com.json"
+  ],
   "data": {
     "type": "sub2api-data",
     "version": 1,
@@ -93,8 +213,10 @@ POST /api/v1/admin/accounts/data
 }
 ```
 
-### 2.3 关键字段说明
+### 4.3 关键字段说明
 
+- `file_names`
+  必传，用于定位需要被替换的远程账号
 - `data.type`
   必传，固定为 `sub2api-data`
 - `data.version`
@@ -120,41 +242,60 @@ POST /api/v1/admin/accounts/data
 - `skip_default_group_bind`
   可选，建议传 `true`，避免导入时自动绑定默认分组
 
-### 2.4 curl 调用示例
+### 4.4 curl 调用示例
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/api/v1/admin/accounts/data" \
+curl -X POST "http://127.0.0.1:8080/api/v1/admin/accounts/replace-by-file-names" \
   -H "Authorization: Bearer <管理员Token>" \
   -H "Content-Type: application/json" \
   --data-binary @sub2api-import-alice-artemis.json
 ```
 
-### 2.5 返回示例
+### 4.5 返回示例
 
 ```json
 {
   "code": 0,
   "message": "success",
   "data": {
+    "requested_files": 2,
+    "matched_files": 2,
+    "deleted_accounts": 2,
+    "not_found_files": 0,
     "proxy_created": 0,
     "proxy_reused": 0,
     "proxy_failed": 0,
     "account_created": 2,
-    "account_failed": 0,
-    "errors": []
+    "account_failed": 0
   }
 }
 ```
 
-## 3. 按文件名删除接口
+## 5. 普通导入接口
 
-### 3.1 路径
+### 5.1 路径
+
+```http
+POST /api/v1/admin/accounts/data
+```
+
+### 5.2 说明
+
+该接口直接导入 `sub2api-data` 包，不做覆盖删除。
+如果你要做“远程已有账号先删再传”，优先使用：
+
+- `POST /api/v1/admin/accounts/get-by-file-names`
+- `POST /api/v1/admin/accounts/replace-by-file-names`
+
+## 6. 按文件名删除接口
+
+### 6.1 路径
 
 ```http
 POST /api/v1/admin/accounts/delete-by-file-names
 ```
 
-### 3.2 请求参数
+### 6.2 请求参数
 
 ```json
 {
@@ -166,14 +307,14 @@ POST /api/v1/admin/accounts/delete-by-file-names
 }
 ```
 
-### 3.3 字段说明
+### 6.3 字段说明
 
 - `file_names`
   必传，凭证文件名数组
 - `dry_run`
   可选，传 `true` 时只匹配，不实际删除
 
-### 3.4 文件名匹配规则
+### 6.4 文件名匹配规则
 
 当前接口内置以下映射规则：
 
@@ -194,7 +335,7 @@ POST /api/v1/admin/accounts/delete-by-file-names
 - 若同名账号存在多条，接口会删除所有精确匹配的账号
 - 若文件名无法识别，会在结果里返回错误，但接口整体仍返回 `code=0`
 
-### 3.5 curl 调用示例
+### 6.5 curl 调用示例
 
 先预览匹配结果：
 
@@ -225,7 +366,7 @@ curl -X POST "http://127.0.0.1:8080/api/v1/admin/accounts/delete-by-file-names" 
   }'
 ```
 
-### 3.6 返回示例
+### 6.6 返回示例
 
 ```json
 {
@@ -263,7 +404,7 @@ curl -X POST "http://127.0.0.1:8080/api/v1/admin/accounts/delete-by-file-names" 
 }
 ```
 
-## 4. 本地脚本调用方式
+## 7. 本地脚本调用方式
 
 仓库内已经提供一个现成脚本：
 
@@ -274,7 +415,9 @@ python tools/upload_sub2api_credentials.py \
   --source "凭证文件或目录"
 ```
 
-### 4.1 只上传
+### 7.1 只上传
+
+原始凭证文件默认走 `replace-by-file-names`，即“覆盖上传”。
 
 ```bash
 python tools/upload_sub2api_credentials.py \
@@ -284,7 +427,7 @@ python tools/upload_sub2api_credentials.py \
            "D:\github\Wei-Shaw\sub2api\tools\antigravity-artemisultra662155@bngg.dsckck.com.json"
 ```
 
-### 4.2 先删后传
+### 7.2 先删后传
 
 ```bash
 python tools/upload_sub2api_credentials.py \
@@ -295,7 +438,7 @@ python tools/upload_sub2api_credentials.py \
   --delete-before-upload
 ```
 
-### 4.3 只删不传
+### 7.3 只删不传
 
 ```bash
 python tools/upload_sub2api_credentials.py \

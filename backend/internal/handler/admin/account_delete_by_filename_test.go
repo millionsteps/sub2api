@@ -35,6 +35,8 @@ func setupAccountDeleteByFileNameRouter() (*gin.Engine, *stubAdminService) {
 	)
 
 	router.POST("/api/v1/admin/accounts/delete-by-file-names", h.DeleteByFileNames)
+	router.POST("/api/v1/admin/accounts/get-by-file-names", h.GetByFileNames)
+	router.POST("/api/v1/admin/accounts/replace-by-file-names", h.ReplaceByFileNames)
 	return router, adminSvc
 }
 
@@ -145,4 +147,100 @@ func TestDeleteByFileNamesReturnsNotFoundForUnsupportedName(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, float64(1), data["not_found_files"])
 	require.Empty(t, adminSvc.deletedAccountIDs)
+}
+
+func TestGetByFileNamesReturnsMatchedAccounts(t *testing.T) {
+	router, adminSvc := setupAccountDeleteByFileNameRouter()
+	now := time.Now().UTC()
+	adminSvc.accounts = []service.Account{
+		{
+			ID:        101,
+			Name:      "codex-alice427dcd@pnj.sixthirtydance.org",
+			Platform:  service.PlatformOpenAI,
+			Type:      service.AccountTypeOAuth,
+			Status:    service.StatusActive,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"file_names": []string{"alice427dcd@pnj.sixthirtydance.org.json"},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/admin/accounts/get-by-file-names",
+		bytes.NewReader(body),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	data, ok := resp["data"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, float64(1), data["matched_files"])
+	results, ok := data["results"].([]any)
+	require.True(t, ok)
+	require.Len(t, results, 1)
+	first, ok := results[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, float64(101), first["matched_account_ids"].([]any)[0])
+}
+
+func TestReplaceByFileNamesDeletesThenImports(t *testing.T) {
+	router, adminSvc := setupAccountDeleteByFileNameRouter()
+	now := time.Now().UTC()
+	adminSvc.accounts = []service.Account{
+		{
+			ID:        101,
+			Name:      "codex-alice427dcd@pnj.sixthirtydance.org",
+			Platform:  service.PlatformOpenAI,
+			Type:      service.AccountTypeOAuth,
+			Status:    service.StatusActive,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"file_names": []string{"alice427dcd@pnj.sixthirtydance.org.json"},
+		"data": map[string]any{
+			"type":    dataType,
+			"version": dataVersion,
+			"proxies": []map[string]any{},
+			"accounts": []map[string]any{
+				{
+					"name":        "codex-alice427dcd@pnj.sixthirtydance.org",
+					"platform":    service.PlatformOpenAI,
+					"type":        service.AccountTypeOAuth,
+					"credentials": map[string]any{"access_token": "new-token"},
+					"concurrency": 3,
+					"priority":    50,
+				},
+			},
+		},
+		"skip_default_group_bind": true,
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/admin/accounts/replace-by-file-names",
+		bytes.NewReader(body),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, []int64{101}, adminSvc.deletedAccountIDs)
+	require.Len(t, adminSvc.createdAccounts, 1)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	data, ok := resp["data"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, float64(1), data["deleted_accounts"])
+	require.Equal(t, float64(1), data["account_created"])
+	require.Equal(t, float64(0), data["account_failed"])
 }
